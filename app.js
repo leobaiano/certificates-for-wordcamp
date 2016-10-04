@@ -37,10 +37,19 @@ app.use('/static', express.static(__dirname + '/assets'));
 
 // Routes
 app.get('/', csrfProtection, function (req, res) {
-  var args        = config.site.index;
-  args.lang       = config.site.lang;
-  args.csrfToken  = req.csrfToken();
+  var error       = req.query.error;
+  var args        = config.site;
+  args.event      = config.event;
   args.formAction = config.routes.certificate;
+  args.csrfToken  = req.csrfToken();
+
+  if (typeof error !== 'undefined') {
+    var err = error.replace(/<(?:.|\n|)*?>|\./gm, '');
+
+    if (config.errors[err]) {
+      args.error = config.errors[err];
+    }
+  }
 
   res.render('index', args);
 });
@@ -49,59 +58,98 @@ app.post('/' + config.routes.certificate, parseForm, csrfProtection, function (r
   var templatePath = path.resolve(__dirname, './views/pdf.html');
   var csv          = new findInCSV(path.resolve(__dirname, './' + config.csv));
   var email        = req.body.email;
-  var base_url     = req.protocol + '://' + req.get('host');
   var args         = {
-    base_url: base_url,
-    logo: config.certificate.logo
+    base_url    : req.protocol + '://' + req.get('host'),
+    certificate : config.certificate,
+    event       : config.event
   };
 
   // Validate email
-  if ('' === email) {
-    res.status(401).send('Missing email address!');
-  }
-  if (!isEmail.validate(email)) {
-    res.status(401).send('Invalid email address!');
+  try {
+    if ('' === email) {
+      throw "missingEmail";
+    }
+    if (!isEmail.validate(email)) {
+      throw "invalidEmail";
+    }
+  } catch(e) {
+    res.redirect('/?error=' + e);
   }
 
+  // Find email in CSV
   csv.get({'email': email}, function (result) {
     if (!result) {
-      res.status(404).send('The email address does not exists!');
+      res.redirect('/?error=emailNoExists');
     }
 
+    // Set attendee args
     args.attendee = result;
 
     if ('Yes' !== args.attendee.attendance) {
-      res.status(401).send('You did not attended to this WordCamp!');
+      res.redirect('/?error=notAttended');
     }
 
     fs.readFile(templatePath, function (err, data) {
       if (err) {
-        throw err;
+        console.log(err);
+        res.redirect('/?error=csvError');
       }
 
+      // Style certificate args
+      args.certificate.textLine2 = args.certificate.textLine2
+        .replace('%event_name%', '<strong>' + args.event.name + '</strong>')
+        .replace('%event_date%', args.event.date)
+        .replace('%attendee_type%', '<strong>' + args.attendee.type.toLowerCase() + '</strong>')
+        .replace('%event_duration%', '<strong>' + args.event.duration + '</strong>');
+
+      // Render PDF
       res.pdfFromHTML({
         filename: config.routes.certificate + '.pdf',
         htmlContent: mustache.render(data.toString(), args),
         options: {
           // File options
-          "type": "pdf",              // allowed file types: png, jpeg, pdf
-          "format": "A4",             // allowed units: A3, A4, A5, Legal, Letter, Tabloid
-          "orientation": "landscape", // portrait or landscape
+          "type": "pdf",              // Allowed file types: png, jpeg, pdf
+          "format": "A4",             // Allowed units: A3, A4, A5, Legal, Letter, Tabloid
+          "orientation": "landscape", // Portrait or landscape
         }
       });
     });
   });
 });
 
+// Handle 404
+app.use(function (req, res) {
+  var args     = config.site;
+  args.event   = config.event;
+  args.message = config.errors.error404;
+
+  res.status(400);
+  res.render('error', args);
+});
+
+// Handle CSRF token errors
 app.use(function (err, req, res, next) {
   if (err.code !== 'EBADCSRFTOKEN') {
     return next(err);
   }
 
-  // Handle CSRF token errors here
+  var args     = config.site;
+  args.event   = config.event;
+  args.message = config.errors.csrfError;
+
   res.status(403);
-  res.send('ERROR MESSAGE HERE');
-})
+  res.render('error', args);
+});
+
+// Handle 500
+app.use(function (err, req, res) {
+  var args     = config.site;
+  args.event   = config.event;
+  args.message = config.errors.error500;
+
+  res.status(500);
+  res.render('error', args);
+});
 
 app.listen(port, function () {
   console.log('Site running on port ' + port + '!');
